@@ -1,0 +1,21 @@
+#######################################
+# Syntax Coloring Map For Wtv
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+Wtv	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+reset	KEYWORD2
+play	KEYWORD2
+
+stop	KEYWORD2
+pause	KEYWORD2
+mute	KEYWORD2
+unmute	KEYWORD2
+setVolume	KEYWORD2
+
