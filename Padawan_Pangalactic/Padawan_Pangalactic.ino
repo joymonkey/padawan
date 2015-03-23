@@ -12,9 +12,26 @@
 //       written with Arduino Mega ADK & PADAWAN Universal Shield in mind        //
 //       Tested with Arduino IDE v1.6.1                                          //
 
+// DROID MOVEMENT SETTINGS...
+#define drivespeed1  50 //set these 3 to whatever speeds work for you. 0=stop, 127=full speed.
+#define drivespeed2 85  //Recommend beginner: 50 to 75, experienced: 100 to 127, I like 100.
+#define drivespeed3 127 //Set to 0 if you only want 2 speeds.                                             
+#define turnspeed 50    // the higher this number the faster it will spin in place, lower - easier to controll. 
+                        // Recommend beginner: 40 to 50, experienced: 50 $ up, I like 75                       
+#define domespeed 127   // If using a speed controller for the dome, sets the top speed
+                        // Use a number up to 127 for serial                       
+#define ramping 5       // Ramping- the lower this number the longer R2 will take to speedup or slow down,
+                        // change this by incriments of 1
+#define domecompensation 0  // For controllers that centering problems, causing slight dome drift in one direction
+#define drivecompensation 0  // use the lowest number with no drift
+                             // (this sets the Sabertooth's Deadband and will persist between restarts)
+                             // Motor powers in the range [-deadband, deadband] will be considered in the deadband,
+                             // and will not prevent the driver from entering nor cause the driver to leave an idle brake state.
+                             // 0 resets to the default, which is 3. valid setting is 0 to 127.                        
+
 // WHAT KIND OF CONTROLLER ARE WE USING?
 #define CONTROL 4 // 0=PS2 (wireless PS2 Receiver connected to pins )
-				  // 1=XB360 Standard Xbox 360  (USB Xbox 360 Receiver dongle)
+		  // 1=XB360 Standard Xbox 360  (USB Xbox 360 Receiver dongle)
                   // 2=PS3 Move Navigator (USB Bluetooth Class 1 dongle)
                   // 3=PS3 Standard DualShock 3 (USB Bluetooth Class 1 dongle)                  
                   // 4=PS4 Standard DualShock 4 (USB Bluetooth Class 1 dongle)
@@ -36,9 +53,10 @@ byte vol = 4; // for WTV 7 = full volume, 0 off . for MP3 Tirgger 0 = full volum
 
 
 // AUTO DOME MODE OPTIONS...
-#define AUTODLY 5000 // Maximum length of time between Auto Dome movements
-#define AUTOSPD 2000 // Maximum speed of Auto Dome movements
-#define AUTOTIM 3000 // Maximum length of time dome motor will spin during Auto Dome Mode
+#define AUTOMAX 16000 // Maximum length of time between Auto Dome movements
+#define AUTOMIN 3500  // Minimum seconds between sounds in auto mode
+#define AUTOSPD 2000  // Maximum speed of Auto Dome movements
+#define AUTOTIM 3000  // Maximum length of time dome motor will spin during Auto Dome Mode
 
 // IS THERE AN 12C DISPLAY CONNECTED?
 #define DISPLAY 1 // 1 for 128x64 OLED display (labeled Heltec.cn)
@@ -88,6 +106,27 @@ const byte vLevels[]PROGMEM = { 255,100,80,60,40,20,10,0 }; //volume levels for 
  LiquidTWI2 lcd(0);      //
 #endif
 
+#include <Sabertooth.h>
+#include <SoftwareSerial.h>
+
+SoftwareSerial STSerial(2, 4); //create soft serial port for the Sabertooth using pin 4
+Sabertooth ST(128, STSerial);
+
+SoftwareSerial SyRSerial(2, 3); //create soft serial port for the Syren using pin 3
+Sabertooth SyR(128, SyRSerial); 
+
+byte drive = 0; // 0 = drive motors off ( right stick disabled )
+byte automate = 0;
+unsigned long automateMillis = 0;
+byte automateDelay = random(AUTOMIN,AUTOMAX);// set this to min and max seconds between sounds
+int turnDirection = 0;
+byte action = 0;
+unsigned long DriveMillis = 0;
+int drivenum = 0;
+int sticknum = 0;
+int domenum = 0;
+int turnnum = 0;
+
 //
 //
 //
@@ -95,6 +134,9 @@ const byte vLevels[]PROGMEM = { 255,100,80,60,40,20,10,0 }; //volume levels for 
 // CONTROLLERS...
 #if (CONTROL==0)
 	//trusty old PS2 controller
+        #include <PS2X_lib.h>
+        PS2X ps2x; // create PS2 Controller Class
+        int error = 0; // part of the ps2x lib
 #elif (CONTROL==1) 
 	// XB360 Standard Xbox 360
 	#include <XBOXRECV.h>
@@ -183,7 +225,22 @@ void setup() {
         #if (DISPLAY==1)
           u8g.setRot180(); //rotate OLED 180 degrees
         #endif
+        
+        STSerial.begin(9600);   // 9600 is the default baud rate for Sabertooth packet serial.
+        //ST.autobaud();          // Send the autobaud command to the Sabertooth controller(s).
+                                // NOTE: *Not all* Sabertooth controllers need this command.
+                                //       It doesn't hurt anything, but V2 controllers use an
+                                //       EEPROM setting (changeable with the function setBaudRate) to set
+                                //       the baud rate instead of detecting with autobaud.
+                                //
+                                //       If you have a 2x12, 2x25 V2, 2x60 or SyRen 50, you can remove
+                                //       the autobaud line and save yourself two seconds of startup delay.
+        ST.setTimeout(950);
+        ST.drive(0); // The Sabertooth won't act on mixed mode packet serial commands until
+        ST.turn(0);  // it has received power levels for BOTH throttle and turning, since it
+                     // mixes the two together to get diff-drive power levels for both motors.
 }
+//end of setup()
 
 //
 //
@@ -208,6 +265,7 @@ void playSound(int soundNumber) {
 		priPlayer.play(soundNumber); //only one audio player is configured. very sad.
 	#endif
 }
+//end of playSound()
 
 //
 //
@@ -230,6 +288,7 @@ void setVolume(byte vol) {
 	#endif
 	playSound(54); //play a short sound so we know what the volume level is at
 }
+//end of setVolume()
 
 //
 //
@@ -242,15 +301,17 @@ boolean reallyconnected=false; //initial connection state
 
 void loop() {
 	//
-        Usb.Task();   
+        #if (CONTROL>0)
+        Usb.Task(); 
+        #endif  
         
-        if (PS4.connected()) {
-          
+        #if (CONTROL==4)
+        if (PS4.connected()) {          
           if (reallyconnected==0) {
             Serial.print(F("\r\nConnected"));
             reallyconnected=true;
             PS4.setLed(Green);
-          }  
+          }
           
           //if (color!=1) { PS4.setLed(Green); color=1; }
           
@@ -278,6 +339,7 @@ void loop() {
           if (loopcount==100) { loopcount=0; Serial.print("\nPair"); }
           delay(20);
         }
+        #endif
         
         
         //Serial.println(loopcount);
@@ -313,6 +375,7 @@ void loop() {
         if (loopcount==1000) loopcount=0;
         
 }
+//end of loop()
 
 
 
